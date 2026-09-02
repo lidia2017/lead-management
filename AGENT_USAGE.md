@@ -30,19 +30,28 @@ myself.
 
 ## One place the agent produced wrong / subtly bad code — and the fix
 
-The agent initially validated the prospect's email by relying on FastAPI's
-`EmailStr` type on the form field. That **silently fails for multipart form
-fields**: `Form(...)` values arrive as plain strings and Pydantic's `EmailStr`
-coercion is not applied the way it is for a JSON body, so an obviously invalid
-address like `not-an-email` sailed through and created a lead.
+**Example A — multipart email validation.** The agent initially validated the
+prospect's email by relying on FastAPI's `EmailStr` type on the form field.
+That **silently fails for multipart form fields**: `Form(...)` values arrive as
+plain strings and Pydantic's `EmailStr` coercion is not applied the way it is
+for a JSON body, so an invalid address like `not-an-email` sailed through. I
+caught it with a test (`test_rejects_bad_email`) asserting `422`; it returned
+`201`. Fix: validate explicitly inside the handler with `TypeAdapter(EmailStr)`.
 
-I caught it by adding a test (`test_rejects_bad_email`) that posts a malformed
-address and asserts a `422` — it failed (the endpoint returned `201`). The fix
-was to validate the email explicitly inside the handler with a
-`TypeAdapter(EmailStr)` and raise `422` on failure. The test now passes and the
-bad address is rejected. This is exactly the kind of "looks-right, is-wrong"
-mistake that only surfaces with a test around the real transport (multipart vs
-JSON), which is why I kept verification in my own hands.
+**Example B — rate-limiter decorator broke the app (caught at import time).**
+When adding scalability, the agent wired the `slowapi` `@limiter.limit(...)`
+decorator onto the public submit route. Because that route uses
+`from __future__ import annotations` **and** an `UploadFile` multipart param,
+slowapi's wrapper couldn't resolve the now-stringified annotations in its own
+module globals — FastAPI blew up at import with a confusing "Invalid args for
+response field! ForwardRef('UploadFile')". The whole test suite failed to even
+collect. I diagnosed the annotation/wrapper interaction, dropped slowapi
+entirely, and reimplemented rate limiting as a small Redis fixed-window
+**FastAPI dependency** — fewer deps, no annotation pitfall, still shared across
+replicas. Tests went back to green (12 passing).
+
+Both are classic "looks-right, is-wrong" agent outputs — one silent, one loud —
+which is why I kept the test suite and every run in my own hands.
 
 ## Prompt-log excerpts
 

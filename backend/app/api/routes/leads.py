@@ -9,6 +9,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     UploadFile,
@@ -22,10 +23,11 @@ from sqlmodel import Session
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_session
+from app.core.ratelimit import rate_limit_public
 from app.models import LeadState, User
 from app.schemas import LeadList, LeadRead, LeadUpdate
-from app.services import lead_service
-from app.services.email.factory import send_lead_emails
+from app.services import idempotency, lead_service
+from app.services.notifications import dispatch_lead_notifications
 from app.services.storage import FileStorage, get_storage
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
@@ -40,10 +42,20 @@ async def create_lead(
     last_name: str = Form(..., min_length=1, max_length=100),
     email: str = Form(...),
     resume: UploadFile = File(...),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: Session = Depends(get_session),
     storage: FileStorage = Depends(get_storage),
+    _rl: None = Depends(rate_limit_public),
 ) -> LeadRead:
     """Public endpoint. A prospect submits the lead form (multipart)."""
+    # Idempotency: a repeat with the same key returns the original lead.
+    if idempotency.is_enabled() and idempotency_key:
+        existing_id = idempotency.lookup(idempotency_key)
+        if existing_id is not None:
+            existing = lead_service.get_lead(session, existing_id)
+            if existing is not None:
+                return existing
+
     # Validate email format explicitly (multipart fields are plain strings).
     try:
         _email_adapter.validate_python(email)
@@ -75,8 +87,11 @@ async def create_lead(
         storage=storage,
     )
 
-    # Fire the two emails after the response is returned.
-    background_tasks.add_task(send_lead_emails, lead)
+    if idempotency.is_enabled() and idempotency_key:
+        idempotency.store(idempotency_key, lead.id)
+
+    # Deliver the two emails off the request path (queue or inline fallback).
+    dispatch_lead_notifications(lead.id, background_tasks)
     return lead
 
 

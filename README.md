@@ -16,9 +16,11 @@ A full-stack application for capturing and managing prospect **leads**.
 |-----------|-----------------------------------------------------|
 | Backend   | FastAPI (Python 3.12), SQLModel                     |
 | Frontend  | Next.js 14 (App Router, TypeScript)                 |
-| Database  | PostgreSQL                                          |
-| Files     | Local volume behind a `FileStorage` interface       |
-| Email     | Pluggable: console / SMTP (MailHog) / SendGrid      |
+| Database  | PostgreSQL (tuned connection pool)                  |
+| Files     | `FileStorage` interface: local volume or S3/MinIO   |
+| Email     | Pluggable (console / SMTP / SendGrid), delivered async via Celery + Redis |
+| Queue     | Redis broker + Celery worker (retryable email)      |
+| Resilience| Per-IP rate limiting + idempotency keys (Redis)     |
 | Auth      | JWT bearer tokens, bcrypt-hashed passwords          |
 
 ## Repository layout

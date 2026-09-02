@@ -14,18 +14,30 @@ deployed to any server.
 docker compose up --build
 ```
 
-This starts four containers:
+This starts these containers:
 
 | Service | URL                       | Purpose                              |
 |---------|---------------------------|--------------------------------------|
 | web     | http://localhost:3000     | Next.js app                          |
 | api     | http://localhost:8000     | FastAPI (`/docs` for Swagger UI)     |
+| worker  | —                         | Celery worker (sends lead emails)    |
 | db      | localhost:5432            | PostgreSQL                           |
+| redis   | localhost:6379            | Broker + rate-limit/idempotency store|
 | mailhog | http://localhost:8025     | Captures every sent email            |
 
 The API auto-creates tables and seeds an attorney on startup. In compose the
-email backend is **SMTP → MailHog**, so submitting a lead produces two messages
-you can view at http://localhost:8025.
+email backend is **SMTP → MailHog** and delivery is **async via Celery**: the
+API enqueues to Redis, the worker sends, and both messages appear at
+http://localhost:8025. Rate limiting and idempotency are enabled here too.
+
+**Scale the workers:** `docker compose up --scale worker=3`.
+
+**Use S3 object storage (MinIO) instead of local disk:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.s3.yml up --build
+# MinIO console: http://localhost:9001  (minioadmin / minioadmin)
+```
 
 **Seeded login:** `attorney@example.com` / `changeme123`
 

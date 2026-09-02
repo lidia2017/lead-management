@@ -45,6 +45,54 @@ class LocalFileStorage(FileStorage):
             return fh.read()
 
 
+class S3FileStorage(FileStorage):
+    """S3 / MinIO backed storage.
+
+    Durable and shared across every API replica (local disk is neither). A
+    fuller implementation would hand the browser a presigned URL so the file
+    bytes never transit the API at all.
+    """
+
+    def __init__(self) -> None:
+        import boto3  # imported lazily so the local backend needs no boto3
+
+        self._boto3 = boto3
+        self.bucket = settings.s3_bucket
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint_url,
+            region_name=settings.s3_region,
+            aws_access_key_id=settings.s3_access_key,
+            aws_secret_access_key=settings.s3_secret_key,
+        )
+        self._ensure_bucket()
+
+    def _ensure_bucket(self) -> None:
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except Exception:
+            try:
+                self.client.create_bucket(Bucket=self.bucket)
+            except Exception:
+                # Bucket may already exist / be managed externally.
+                pass
+
+    def save(self, data: bytes, filename: str) -> str:
+        from pathlib import Path as _Path
+
+        key = f"{uuid.uuid4().hex}{_Path(filename).suffix}"
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
+        return key
+
+    def read(self, path: str) -> bytes:
+        try:
+            resp = self.client.get_object(Bucket=self.bucket, Key=path)
+            return resp["Body"].read()
+        except self.client.exceptions.NoSuchKey as exc:
+            raise FileNotFoundError(path) from exc
+
+
 def get_storage() -> FileStorage:
-    # Extend here for s3/gcs backends keyed off an env var.
+    if settings.storage_backend.lower() == "s3":
+        return S3FileStorage()
     return LocalFileStorage(os.path.abspath(settings.upload_dir))

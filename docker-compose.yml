@@ -1,5 +1,10 @@
 # One command to run the whole stack locally: `docker compose up --build`.
 # Nothing here is deployed anywhere — it spins up on your own machine.
+#
+# Scalability wiring enabled here:
+#   - emails are enqueued to Redis and delivered by a separate Celery worker
+#   - the public submit endpoint is rate-limited and idempotent (Redis-backed)
+# To also demonstrate S3 object storage, see docker-compose.s3.yml.
 services:
   db:
     image: postgres:16-alpine
@@ -17,6 +22,16 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # Local mail catcher — the SMTP backend delivers here.
   # Web UI at http://localhost:8025 to view sent emails.
   mailhog:
@@ -27,11 +42,14 @@ services:
 
   api:
     build: ./backend
-    environment:
+    environment: &backend_env
       ENVIRONMENT: development
       DATABASE_URL: postgresql+psycopg2://leads:leads@db:5432/leads
+      REDIS_URL: redis://redis:6379/0
       JWT_SECRET: dev-secret-change-me
       UPLOAD_DIR: /app/uploads
+      STORAGE_BACKEND: local
+      EMAIL_DELIVERY: celery
       EMAIL_BACKEND: smtp
       SMTP_HOST: mailhog
       SMTP_PORT: 1025
@@ -39,6 +57,9 @@ services:
       ATTORNEY_NOTIFY_EMAIL: attorney@example.com
       SEED_ATTORNEY_EMAIL: attorney@example.com
       SEED_ATTORNEY_PASSWORD: changeme123
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_PUBLIC: 10/minute
+      IDEMPOTENCY_ENABLED: "true"
       CORS_ORIGINS: http://localhost:3000
     ports:
       - "8000:8000"
@@ -46,6 +67,24 @@ services:
       - uploads:/app/uploads
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+
+  # Celery worker: delivers lead emails off the request path, with retries.
+  # Scale horizontally with: docker compose up --scale worker=3
+  worker:
+    build: ./backend
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    environment: *backend_env
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       mailhog:
         condition: service_started

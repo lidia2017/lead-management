@@ -131,7 +131,59 @@ Only `PENDING → REACHED_OUT` is allowed. Any other transition is rejected with
 - **State transitions validated server-side** — the client cannot force an
   illegal transition; the rule lives in the service layer.
 
-## 7. Production hardening (out of scope, noted)
+## 7. Scaling for load
+
+The app is built so scaling is a matter of **configuration and topology**, not
+rewrites. The public submit path (spiky, bot-prone) and the internal dashboard
+(low traffic) scale independently.
+
+### Implemented in this repo (toggle via env; on by default in Docker)
+
+- **Async email via a queue** (`EMAIL_DELIVERY=celery`). The API enqueues a job
+  to **Redis** and returns `201` immediately; a separate **Celery worker** pool
+  sends the mail with automatic retries + exponential backoff. A slow/down mail
+  provider can no longer block or lose a submission, and the workers scale on
+  their own (`docker compose up --scale worker=3`). Falls back to an in-process
+  `BackgroundTask` when set to `inline` (dev/tests).
+- **Rate limiting** on the public endpoint (`RATE_LIMIT_ENABLED=true`), a per-IP
+  fixed window backed by Redis so the limit is shared across all API replicas.
+  Sheds bot/spam load before it hits the DB or mail pipeline. Fail-open.
+- **Idempotency** on the public endpoint (`IDEMPOTENCY_ENABLED=true`) via an
+  `Idempotency-Key` header stored in Redis — double-clicks / client retries
+  return the original lead instead of creating duplicates.
+- **Object storage** for resumes (`STORAGE_BACKEND=s3`) behind the existing
+  `FileStorage` interface, so many stateless API replicas share one durable
+  store instead of local disk. Demonstrated with MinIO (`docker-compose.s3.yml`).
+- **DB connection pooling** tuned per replica (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`).
+
+### Topology it enables
+
+```
+   CDN ─ Next.js            edge: rate limit + CAPTCHA + WAF
+                                     │
+                               Load Balancer
+                                     │
+                      ┌── stateless API replicas (autoscaled) ──┐
+                      │            │              │             │
+                 Postgres      PgBouncer       S3/MinIO       Redis
+                primary+replicas                             (broker)
+                                                                │
+                                                     Celery worker pool
+                                                     (retries + DLQ)
+```
+
+Because auth is stateless (JWT), storage and email sit behind interfaces, and
+business rules live in the service layer, each box above is swappable/scalable
+without touching application logic.
+
+### Next steps if traffic grew further
+
+- Postgres **read replicas** for the dashboard's read-heavy queries; keyset
+  pagination instead of `OFFSET`.
+- **Presigned S3 URLs** so resume bytes never transit the API.
+- Dead-letter queue + alerting on worker failures; CAPTCHA at the edge.
+
+## 8. Production hardening (out of scope, noted)
 
 - Alembic migrations, connection pooling tuning.
 - Object storage (S3) + presigned upload/download URLs + virus scanning of
