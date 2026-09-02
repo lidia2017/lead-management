@@ -48,11 +48,23 @@ Added behind env flags so defaults keep the app runnable with no extra infra:
   `docker-compose.s3.yml`).
 - **DB connection pooling** (`app/core/database.py`).
 
+## Correctness / reliability fixes (agent-generated, human-directed)
+
+Found during a self-audit against consistency/availability/reliability:
+
+- **Broker outage no longer breaks submit** — `dispatch_lead_notifications`
+  falls back to inline delivery if the Celery enqueue fails.
+- **No orphaned resume files** — `create_lead` deletes the stored blob if the
+  DB commit fails (added `FileStorage.delete`).
+- **Race-free idempotency** — atomic Redis `SET NX` reserve/finalize/release
+  replaces the earlier get-then-set (which could let concurrent duplicates both
+  create a lead).
+
 ## Verification performed
 
-- `pytest` — **12 tests passing** (public submit, validation, auth guards,
-  state transitions, resume download, rate-limit parsing, idempotency-off
-  behaviour).
+- `pytest` — **15 tests passing** (public submit, validation, auth guards,
+  state transitions, resume download, rate-limit parsing, idempotency
+  race-safety + fail-open, orphaned-file cleanup).
 - Backend + Celery worker modules import cleanly.
 - Frontend production build / typecheck run clean.
 - Full E2E exercised via Docker Compose (form → queued email in MailHog →

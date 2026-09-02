@@ -48,8 +48,10 @@ async def create_lead(
     _rl: None = Depends(rate_limit_public),
 ) -> LeadRead:
     """Public endpoint. A prospect submits the lead form (multipart)."""
-    # Idempotency: a repeat with the same key returns the original lead.
-    if idempotency.is_enabled() and idempotency_key:
+    use_idempotency = idempotency.is_enabled() and bool(idempotency_key)
+
+    # Fast path: this key already produced a lead — return it, do no work.
+    if use_idempotency:
         existing_id = idempotency.lookup(idempotency_key)
         if existing_id is not None:
             existing = lead_service.get_lead(session, existing_id)
@@ -76,19 +78,37 @@ async def create_lead(
     except lead_service.LeadValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    lead = lead_service.create_lead(
-        session,
-        first_name=first_name,
-        last_name=last_name,
-        email=email,
-        resume_bytes=contents,
-        resume_filename=resume.filename or "resume",
-        resume_content_type=resume.content_type or "application/octet-stream",
-        storage=storage,
-    )
+    # Atomically claim the key so concurrent duplicates can't both create a lead.
+    if use_idempotency and not idempotency.reserve(idempotency_key):
+        # Someone else holds the key: it either completed or is in progress.
+        existing_id = idempotency.lookup(idempotency_key)
+        if existing_id is not None:
+            existing = lead_service.get_lead(session, existing_id)
+            if existing is not None:
+                return existing
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A submission with this Idempotency-Key is already being processed.",
+        )
 
-    if idempotency.is_enabled() and idempotency_key:
-        idempotency.store(idempotency_key, lead.id)
+    try:
+        lead = lead_service.create_lead(
+            session,
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            resume_bytes=contents,
+            resume_filename=resume.filename or "resume",
+            resume_content_type=resume.content_type or "application/octet-stream",
+            storage=storage,
+        )
+    except Exception:
+        if use_idempotency:
+            idempotency.release(idempotency_key)  # let a retry succeed
+        raise
+
+    if use_idempotency:
+        idempotency.finalize(idempotency_key, lead.id)
 
     # Deliver the two emails off the request path (queue or inline fallback).
     dispatch_lead_notifications(lead.id, background_tasks)

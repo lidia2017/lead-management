@@ -33,12 +33,23 @@ def send_lead_notifications(lead_id: str | uuid.UUID) -> None:
 def dispatch_lead_notifications(
     lead_id: uuid.UUID, background_tasks: BackgroundTasks
 ) -> None:
-    """Route the work: enqueue to Celery, or run inline after the response."""
-    if settings.email_delivery.lower() == "celery":
-        # Imported lazily so the inline path (and tests) never import Celery.
-        from app.worker import send_lead_emails_task
+    """Route the work: enqueue to Celery, or run inline after the response.
 
-        send_lead_emails_task.delay(str(lead_id))
-        logger.info("Enqueued lead notifications for %s", lead_id)
-    else:
-        background_tasks.add_task(send_lead_notifications, str(lead_id))
+    If enqueue fails (e.g. the broker is down), we fall back to inline delivery
+    rather than failing the whole submission — the queue is there to *add*
+    resilience, so its outage must never take the public endpoint down.
+    """
+    if settings.email_delivery.lower() == "celery":
+        try:
+            # Imported lazily so the inline path (and tests) never import Celery.
+            from app.worker import send_lead_emails_task
+
+            send_lead_emails_task.delay(str(lead_id))
+            logger.info("Enqueued lead notifications for %s", lead_id)
+            return
+        except Exception:
+            logger.warning(
+                "Enqueue failed for %s; falling back to inline delivery", lead_id
+            )
+
+    background_tasks.add_task(send_lead_notifications, str(lead_id))

@@ -5,6 +5,7 @@ enforced in one place and is trivially unit-testable.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -12,6 +13,8 @@ from sqlmodel import Session, func, select
 
 from app.models import Lead, LeadState
 from app.services.storage import FileStorage
+
+logger = logging.getLogger("lead_service")
 
 # Allowed transitions: from-state -> set of valid to-states.
 _ALLOWED_TRANSITIONS: dict[LeadState, set[LeadState]] = {
@@ -63,7 +66,17 @@ def create_lead(
         state=LeadState.PENDING,
     )
     session.add(lead)
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        # The blob is already written; if the row didn't persist, don't leave
+        # an orphaned file behind.
+        session.rollback()
+        try:
+            storage.delete(stored_path)
+        except Exception:
+            logger.warning("Failed to clean up orphaned resume %s", stored_path)
+        raise
     session.refresh(lead)
     return lead
 

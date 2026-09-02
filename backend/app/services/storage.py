@@ -22,6 +22,10 @@ class FileStorage(ABC):
     def read(self, path: str) -> bytes:
         ...
 
+    @abstractmethod
+    def delete(self, path: str) -> None:
+        """Remove a stored object. Must not raise if it is already gone."""
+
 
 class LocalFileStorage(FileStorage):
     def __init__(self, base_dir: str) -> None:
@@ -43,6 +47,9 @@ class LocalFileStorage(FileStorage):
             raise FileNotFoundError(path)
         with open(full, "rb") as fh:
             return fh.read()
+
+    def delete(self, path: str) -> None:
+        (self.base_dir / path).unlink(missing_ok=True)
 
 
 class S3FileStorage(FileStorage):
@@ -90,6 +97,10 @@ class S3FileStorage(FileStorage):
             return resp["Body"].read()
         except self.client.exceptions.NoSuchKey as exc:
             raise FileNotFoundError(path) from exc
+
+    def delete(self, path: str) -> None:
+        # delete_object is idempotent — no error if the key is already gone.
+        self.client.delete_object(Bucket=self.bucket, Key=path)
 
 
 def get_storage() -> FileStorage:
