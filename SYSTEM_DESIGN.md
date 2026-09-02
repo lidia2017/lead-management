@@ -15,41 +15,63 @@ Build an application that supports **creating, getting, and updating leads**.
 
 ## 2. High-level architecture
 
+Each component is its own box/service. The **request path** (solid, top→down)
+stays fast; the slow email work is handed to Redis and processed on a separate
+**async path** (the worker) so a submission never waits on mail delivery.
+
 ```
-                Public internet
-                      │
-        ┌─────────────┴──────────────┐
-        │                            │
-  Prospect (no auth)          Attorney (authenticated)
-        │                            │
-        ▼                            ▼
-┌───────────────────────────────────────────────┐
-│                Next.js web app                 │
-│  /            public lead form                 │
-│  /login       attorney login                   │
-│  /leads       internal list + state controls   │
-└───────────────┬───────────────────────────────┘
-                │  HTTPS / JSON + multipart
-                ▼
-┌───────────────────────────────────────────────┐
-│                 FastAPI backend                │
-│  POST /api/leads            (public)           │
-│  GET  /api/leads            (auth)             │
-│  GET  /api/leads/{id}       (auth)             │
-│  PATCH/api/leads/{id}       (auth)             │
-│  GET  /api/leads/{id}/resume(auth)             │
-│  POST /api/auth/login       (public)           │
-│  GET  /api/auth/me          (auth)             │
-└───┬───────────────┬───────────────┬───────────┘
-    │               │               │
-    ▼               ▼               ▼
-┌─────────┐   ┌────────────┐   ┌───────────────┐
-│Postgres │   │ File store │   │ Email service │
-│ leads,  │   │ resumes on │   │ (pluggable):  │
-│ users   │   │ disk volume│   │ console/SMTP/ │
-│         │   │            │   │ SendGrid/SES  │
-└─────────┘   └────────────┘   └───────────────┘
+                          Public internet
+                                │
+             ┌──────────────────┴───────────────────┐
+             │                                       │
+      Prospect (public)                     Attorney (authenticated)
+             │                                       │
+             └──────────────────┬────────────────────┘
+                                ▼
+                     ┌──────────────────────┐
+                     │     Next.js web app   │  public form · login · dashboard
+                     └───────────┬──────────┘
+                                 │  HTTPS  (JSON + multipart)
+                                 ▼
+                     ┌──────────────────────┐
+                     │     Load balancer     │  TLS · WAF · CDN for static assets
+                     └───────────┬──────────┘
+                                 ▼
+             ┌───────────────────────────────────────────┐
+             │        FastAPI  (stateless · scale to N)    │
+             │  JWT auth · state machine · validation ·    │
+             │  rate limiting · idempotency                │
+             └──┬───────────────┬───────────────┬──────┬──┘
+     write/read │        store  │      use      │      │  enqueue email job
+     lead+user  │        resume │      Redis    │      │  (returns 201 now)
+                ▼               ▼               ▼      ▼
+        ┌──────────────┐ ┌────────────┐ ┌───────────────────────┐
+        │  PostgreSQL   │ │ File store │ │        Redis           │
+        │  leads, users │ │ local vol  │ │  • Celery broker       │
+        │  pool +       │ │ or S3/MinIO│ │  • rate-limit counters │
+        │  read replicas│ │            │ │  • idempotency keys    │
+        └──────────────┘ └────────────┘ └───────────┬───────────┘
+                                                     │  worker consumes jobs
+                                                     ▼
+                                          ┌────────────────────┐
+                                          │  Celery worker pool │  retries +
+                                          │  (scale to M)       │  backoff
+                                          └──────────┬─────────┘
+                                                     ▼
+                                          ┌────────────────────┐
+                                          │  Email service      │  console /
+                                          │  (pluggable)        │  SMTP(MailHog)
+                                          └──────────┬─────────┘  / SendGrid
+                                                     ▼
+                                     emails to prospect + attorney
 ```
+
+Boxes actually implemented in this repo: Next.js, FastAPI (with JWT, the state
+machine, rate limiting, idempotency), PostgreSQL, the local/S3 file store,
+Redis, the Celery worker, and the pluggable email service. The **load balancer**
+and multiple **API replicas / read replicas** are the deployment-time scale-out
+seam — the app is stateless and storage/email sit behind interfaces, so adding
+them requires no code change (see §7).
 
 ## 3. Data model
 
