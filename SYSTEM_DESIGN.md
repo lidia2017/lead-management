@@ -180,23 +180,56 @@ rewrites. The public submit path (spiky, bot-prone) and the internal dashboard
 
 ### Topology it enables
 
+Same components as §2, scaled out: the API fans out behind a load balancer, the
+data stores each scale on their own axis, and the async email path runs on an
+independently-scaled worker pool.
+
 ```
-   CDN ─ Next.js            edge: rate limit + CAPTCHA + WAF
-                                     │
-                               Load Balancer
-                                     │
-                      ┌── stateless API replicas (autoscaled) ──┐
-                      │            │              │             │
-                 Postgres      PgBouncer       S3/MinIO       Redis
-                primary+replicas                             (broker)
-                                                                │
-                                                     Celery worker pool
-                                                     (retries + DLQ)
+                 Prospect / Attorney browsers
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │    CDN  +  Next.js web   │   static assets cached at edge
+                 └────────────┬───────────┘
+                              ▼
+                 ┌────────────────────────┐
+                 │    Edge / WAF            │   TLS · rate limit · CAPTCHA
+                 └────────────┬───────────┘
+                              ▼
+                 ┌────────────────────────┐
+                 │      Load balancer       │
+                 └────────────┬───────────┘
+                              ▼
+       ┌────────────────────────────────────────────┐
+       │   Stateless FastAPI replicas (autoscaled)     │
+       │        api-1    api-2    ...    api-N          │
+       └──┬───────────────┬────────────────┬──────────┘
+   pooled │         use   │        enqueue  │   put/get resume
+    conns │        Redis  │        email    │   (presigned URL)
+          ▼               ▼                 ▼
+   ┌────────────┐   ┌───────────────┐   ┌──────────────┐
+   │ PgBouncer   │   │    Redis       │   │  S3 / MinIO   │
+   │     │       │   │  broker +      │   │  object store │
+   │     ▼       │   │  rate-limit +  │   └──────────────┘
+   │ PostgreSQL  │   │  idempotency   │
+   │ primary     │   └───────┬───────┘
+   │   │ replicate│           │  workers consume
+   │   ▼         │           ▼
+   │ read        │   ┌────────────────────┐
+   │ replicas    │   │ Celery worker pool   │  retries + backoff
+   └────────────┘   │ (autoscaled)         │  + dead-letter queue
+                    └──────────┬─────────┘
+                               ▼
+                    ┌────────────────────┐
+                    │  Email provider      │  SES / SendGrid
+                    └────────────────────┘
 ```
 
 Because auth is stateless (JWT), storage and email sit behind interfaces, and
 business rules live in the service layer, each box above is swappable/scalable
-without touching application logic.
+without touching application logic. Reads (dashboard) hit Postgres **read
+replicas** while writes go to the **primary**; the public write path and the
+async email path each scale independently of the low-traffic dashboard.
 
 ### Next steps if traffic grew further
 
