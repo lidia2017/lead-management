@@ -1,0 +1,64 @@
+# One command to run the whole stack locally: `docker compose up --build`.
+# Nothing here is deployed anywhere — it spins up on your own machine.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leads
+      POSTGRES_PASSWORD: leads
+      POSTGRES_DB: leads
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leads"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Local mail catcher — the SMTP backend delivers here.
+  # Web UI at http://localhost:8025 to view sent emails.
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  api:
+    build: ./backend
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+psycopg2://leads:leads@db:5432/leads
+      JWT_SECRET: dev-secret-change-me
+      UPLOAD_DIR: /app/uploads
+      EMAIL_BACKEND: smtp
+      SMTP_HOST: mailhog
+      SMTP_PORT: 1025
+      EMAIL_FROM: no-reply@leadmanager.example
+      ATTORNEY_NOTIFY_EMAIL: attorney@example.com
+      SEED_ATTORNEY_EMAIL: attorney@example.com
+      SEED_ATTORNEY_PASSWORD: changeme123
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+
+  web:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  db_data:
+  uploads:

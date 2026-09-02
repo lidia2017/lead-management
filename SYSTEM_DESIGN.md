@@ -1,0 +1,144 @@
+# Lead Management — System Design
+
+## 1. Problem statement
+
+Build an application that supports **creating, getting, and updating leads**.
+
+- A **lead** is a form that is **publicly** available for prospects to fill in.
+  Required fields: `first name`, `last name`, `email`, `resume / CV`.
+- On submission the system sends emails to **both** the prospect and an
+  **attorney** inside the company.
+- An **internal UI** (guarded by auth) renders the list of leads with all the
+  data the prospect filled in.
+- Each lead has a **state**: it starts at `PENDING` and transitions to
+  `REACHED_OUT` when an attorney manually marks it after reaching out.
+
+## 2. High-level architecture
+
+```
+                Public internet
+                      │
+        ┌─────────────┴──────────────┐
+        │                            │
+  Prospect (no auth)          Attorney (authenticated)
+        │                            │
+        ▼                            ▼
+┌───────────────────────────────────────────────┐
+│                Next.js web app                 │
+│  /            public lead form                 │
+│  /login       attorney login                   │
+│  /leads       internal list + state controls   │
+└───────────────┬───────────────────────────────┘
+                │  HTTPS / JSON + multipart
+                ▼
+┌───────────────────────────────────────────────┐
+│                 FastAPI backend                │
+│  POST /api/leads            (public)           │
+│  GET  /api/leads            (auth)             │
+│  GET  /api/leads/{id}       (auth)             │
+│  PATCH/api/leads/{id}       (auth)             │
+│  GET  /api/leads/{id}/resume(auth)             │
+│  POST /api/auth/login       (public)           │
+│  GET  /api/auth/me          (auth)             │
+└───┬───────────────┬───────────────┬───────────┘
+    │               │               │
+    ▼               ▼               ▼
+┌─────────┐   ┌────────────┐   ┌───────────────┐
+│Postgres │   │ File store │   │ Email service │
+│ leads,  │   │ resumes on │   │ (pluggable):  │
+│ users   │   │ disk volume│   │ console/SMTP/ │
+│         │   │            │   │ SendGrid/SES  │
+└─────────┘   └────────────┘   └───────────────┘
+```
+
+## 3. Data model
+
+### `leads`
+| column            | type        | notes                                   |
+|-------------------|-------------|-----------------------------------------|
+| id                | UUID (PK)   |                                         |
+| first_name        | text        | required                                |
+| last_name         | text        | required                                |
+| email             | text        | required, validated                     |
+| resume_filename   | text        | original filename                       |
+| resume_path       | text        | path on the file volume                 |
+| resume_content_type | text      | mime type                               |
+| state             | enum        | `PENDING` \| `REACHED_OUT`, default PENDING |
+| created_at        | timestamptz |                                         |
+| updated_at        | timestamptz |                                         |
+
+### `users` (attorneys / internal staff)
+| column          | type        | notes                        |
+|-----------------|-------------|------------------------------|
+| id              | UUID (PK)   |                              |
+| email           | text unique | login identifier             |
+| hashed_password | text        | bcrypt                       |
+| full_name       | text        |                              |
+| role            | text        | `attorney` (default)         |
+| created_at      | timestamptz |                              |
+
+### State machine
+```
+PENDING ──(attorney marks reached out)──▶ REACHED_OUT
+```
+Only `PENDING → REACHED_OUT` is allowed. Any other transition is rejected with
+`409 Conflict`. The transition is manual and requires authentication.
+
+## 4. API surface
+
+| Method | Path                      | Auth | Purpose                              |
+|--------|---------------------------|------|--------------------------------------|
+| POST   | `/api/leads`              | ❌   | Public form submit (multipart)       |
+| GET    | `/api/leads`              | ✅   | List leads (filter by state, paged)  |
+| GET    | `/api/leads/{id}`         | ✅   | Lead detail                          |
+| PATCH  | `/api/leads/{id}`         | ✅   | Update state (PENDING→REACHED_OUT)   |
+| GET    | `/api/leads/{id}/resume`  | ✅   | Download the resume                  |
+| POST   | `/api/auth/login`         | ❌   | Exchange email/password for a JWT    |
+| GET    | `/api/auth/me`            | ✅   | Current user                         |
+| GET    | `/api/health`             | ❌   | Liveness probe                       |
+
+## 5. Key flows
+
+### Lead submission (public)
+1. Prospect submits the form (multipart: fields + resume file).
+2. API validates fields + file (type/size), persists the file to the volume,
+   inserts a `PENDING` lead row.
+3. API schedules two emails via a **BackgroundTask** so the HTTP response is
+   fast: a confirmation to the prospect and a notification to the attorney.
+4. Returns the created lead (201).
+
+### Attorney workflow (internal)
+1. Attorney logs in → receives a JWT (stored client-side).
+2. `/leads` fetches the list with the bearer token; can filter by state.
+3. Attorney reviews a lead, downloads the resume, and marks it `REACHED_OUT`.
+
+## 6. Design decisions & trade-offs
+
+- **Pluggable email service** — an `EmailService` interface with `console`
+  (dev), `smtp` (MailHog / any SMTP), and a `sendgrid`/`ses` adapter selectable
+  via `EMAIL_BACKEND`. Keeps the app runnable with zero external accounts while
+  proving the integration seam. Emails are sent in a background task so a slow
+  provider never blocks form submission.
+- **Local file storage behind a `FileStorage` interface** — resumes live on a
+  mounted volume in dev; the interface makes swapping in S3/GCS a one-class
+  change. DB stores only metadata + path, never the blob.
+- **Postgres + SQLModel** — typed models shared between ORM and validation.
+  Migrations via `SQLModel.metadata.create_all` for the take-home; a
+  production repo would use Alembic (noted, stubbed).
+- **JWT auth** — stateless bearer tokens, bcrypt-hashed passwords, a seeded
+  attorney. Simple to reason about and to guard the internal routes with a
+  FastAPI dependency.
+- **State transitions validated server-side** — the client cannot force an
+  illegal transition; the rule lives in the service layer.
+
+## 7. Production hardening (out of scope, noted)
+
+- Alembic migrations, connection pooling tuning.
+- Object storage (S3) + presigned upload/download URLs + virus scanning of
+  resumes.
+- Rate limiting / CAPTCHA on the public endpoint to stop spam.
+- Refresh tokens + short-lived access tokens, RBAC, audit log of state changes.
+- Idempotency keys on submit; retryable email delivery via a queue (SQS/Celery).
+- Observability: structured logs, metrics, tracing, error tracking.
+- CI/CD, infra-as-code, secrets manager instead of `.env`.
+```
