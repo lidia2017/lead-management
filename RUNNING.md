@@ -21,7 +21,7 @@ This starts these containers:
 | web     | http://localhost:3000     | Next.js app                          |
 | api     | http://localhost:8000     | FastAPI (`/docs` for Swagger UI)     |
 | worker  | —                         | Celery worker (sends lead emails)    |
-| db      | localhost:5432            | PostgreSQL                           |
+| db      | localhost:5433            | PostgreSQL (host port 5433 → 5432)   |
 | redis   | localhost:6379            | Broker + rate-limit/idempotency store|
 | mailhog | http://localhost:8025     | Captures every sent email            |
 

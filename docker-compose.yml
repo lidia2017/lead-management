@@ -13,7 +13,9 @@ services:
       POSTGRES_PASSWORD: leads
       POSTGRES_DB: leads
     ports:
-      - "5432:5432"
+      # Host 5433 (5432 is often taken by a local/other Postgres); the app
+      # still reaches Postgres at db:5432 over the compose network.
+      - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
