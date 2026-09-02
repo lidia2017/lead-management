@@ -100,3 +100,14 @@ session, in order:
 > "The Postgres container failed to start — port 5432 is already allocated." —
 > agent diagnosed a pre-existing container holding the port and remapped the
 > host port to 5433 without touching the other project.
+
+> "Redraw the §2 architecture diagram so the scalable components we actually
+> built — the load balancer, Redis, and the queue/worker — each show up as
+> their own box instead of being folded into the backend." — agent redrew the
+> high-level diagram with every component as a distinct box and made the sync
+> request path vs. the async email path explicit.
+
+> "Refresh the §7 topology diagram to match." — agent redrew the production
+> scale-out (CDN + Next.js, edge/WAF, load balancer, autoscaled stateless API,
+> PgBouncer → Postgres primary + read replicas, Redis, S3/MinIO, and an
+> autoscaled Celery worker pool with a dead-letter queue → email provider).
