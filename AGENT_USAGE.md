@@ -53,10 +53,18 @@ replicas. Tests went back to green (12 passing).
 Both are classic "looks-right, is-wrong" agent outputs — one silent, one loud —
 which is why I kept the test suite and every run in my own hands.
 
+## How I worked with the agent
+
+Interactive, iterative session. I set direction and acceptance criteria; the
+agent wrote code **and** ran the verification itself (pytest, `next build`,
+`docker compose up`, and a live end-to-end smoke test against the running
+stack), reporting results back for me to review. I steered at decision points
+and vetoed/redirected when output was wrong (see the two bugs above).
+
 ## Prompt-log excerpts
 
-See `NOTES.md` for per-file attribution. Representative prompts from the
-session:
+See `NOTES.md` for per-file attribution. Representative prompts across the
+session, in order:
 
 > "Build a full-stack lead-management app: FastAPI + Next.js, Postgres + local
 > file storage for resumes, pluggable email (console/SMTP/SendGrid) sent in a
@@ -72,3 +80,23 @@ session:
 > and covers: public submit → PENDING, bad email → 422, unsupported file → 400,
 > list requires auth, state transition + illegal transition, resume download
 > requires auth."
+
+> "Add the scalability pieces: async email via a Celery/Redis worker with an
+> inline fallback, per-IP rate limiting on the public endpoint, idempotency
+> keys, and an S3/MinIO storage option behind the FileStorage interface. Keep
+> everything env-gated so the default still runs with no extra infra."
+
+> "Did we take care of consistency & correctness, availability & reliability,
+> performance? Give me an honest scorecard of what's actually implemented vs.
+> what's missing." — this prompted a self-audit that surfaced three real bugs
+> (broker outage failing submit, orphaned resume files on a failed commit, and
+> a get-then-set idempotency race).
+
+> "Fix those three now with tests, then boot the whole stack and run the E2E
+> flow to prove it works." — agent implemented the fixes, added 3 tests (15
+> passing), brought up Docker Compose, and ran a scripted submit → email →
+> login → mark-reached-out → download smoke test.
+
+> "The Postgres container failed to start — port 5432 is already allocated." —
+> agent diagnosed a pre-existing container holding the port and remapped the
+> host port to 5433 without touching the other project.
